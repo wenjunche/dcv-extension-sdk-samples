@@ -17,10 +17,17 @@
 //  */
 
 using System;
+using System.Collections;
 using System.Diagnostics;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using DcvExtensionVirtualChannelsCS.DcvExtensions;
+using Newtonsoft.Json;
+using Openfin.Desktop;
+using Openfin.Desktop.InteropAPI;
+using Openfin.Desktop.Logging;
+using Openfin.Desktop.Messaging;
 
 namespace DcvExtensionVirtualChannelsCS
 {
@@ -32,20 +39,24 @@ namespace DcvExtensionVirtualChannelsCS
     internal class Program
     {
         private const string VirtualChannelName = "echo";
-        private const int DataChunk = 1024;
+        private const int DataChunk = 1024 * 100;
+        private static Runtime _runtime;
+        private static ChannelProvider _channelProvider;
 
         private static readonly string LogPath =
             $@"C:\Temp\DcvExtensionVirtualChannelsCS_{Process.GetCurrentProcess().Id}.log";
+        private static readonly SimpleLogger logger = new SimpleLogger(LogPath);
+
 
         public static void Main()
         {
-            MainAsync().GetAwaiter().GetResult();
+            StartOpenFin(null);
+            Thread.Sleep(1000 * 5000);
+            // MainAsync().GetAwaiter().GetResult();
         }
 
         private static async Task MainAsync()
         {
-            var logger = new SimpleLogger(LogPath);
-
             try
             {
                 logger.Log("DCV Extension Virtual Channels C#");
@@ -98,33 +109,38 @@ namespace DcvExtensionVirtualChannelsCS
                     for (var i = 0; i < 1000; ++i)
                     {
                         var numBytes = await virtualChannel.ReadAsync(readBuffer, 0, readBuffer.Length);
-                        if (numBytes == 0) break;
+                        if (numBytes == 0)
+                        {
+                            logger.Log("zero read,  continue");
+                            continue;
+                        }
 
                         logger.Log("Received bytes: {0}",
                             BitConverter.ToString(readBuffer.AsSpan(0, numBytes).ToArray()));
+                        var message = Encoding.UTF8.GetString(readBuffer);
+                        if (_channelProvider != null)
+                        {
+                            logger.Log($"Broadcasting {message}");
+                            _channelProvider.Broadcast("proxy-request", message);
+                        }
                     }
                 });
 
                 // Write data on the named pipe
                 var writeTask = Task.Run(async () =>
                 {
-                    for (var i = 0; i < 1000; ++i)
-                    {
-                        // Virtual channels transfer binary data, in this example we transfer UTF8 strings converted to binary
-                        var message = $"Extension message {i}";
-                        var bytes = Encoding.UTF8.GetBytes(message);
-
-                        // Send data to the named pipe of the virtual channel
-                        await virtualChannel.WriteAsync(bytes, 0, bytes.Length);
-
-                        logger.Log("Sent bytes: {0}", BitConverter.ToString(bytes.AsSpan(0, bytes.Length).ToArray()));
-
-                        await Task.Delay(2000);
-                    }
+                    // Virtual channels transfer binary data, in this example we transfer UTF8 strings converted to binary
+                    var message = $"Extension message";
+                    var bytes = Encoding.UTF8.GetBytes(message);
+                    // Send data to the named pipe of the virtual channel
+                    await virtualChannel.WriteAsync(bytes, 0, bytes.Length);
+                    logger.Log("Sent bytes: {0}", BitConverter.ToString(bytes.AsSpan(0, bytes.Length).ToArray()));
                 });
 
+                StartOpenFin(virtualChannel);
+
                 // Wait until one of the two tasks completes
-                await Task.WhenAny(readTask, writeTask);
+                await Task.WhenAll(readTask, writeTask);
 
                 // Close the virtual channel
                 await processor.CloseVirtualChannelAsync(VirtualChannelName);
@@ -144,5 +160,54 @@ namespace DcvExtensionVirtualChannelsCS
                 logger.Log("Exiting");
             }
         }
+
+        private static void Runtime_Connected()
+        {
+            logger.Log("Connected to Runtime");
+
+        }
+
+        private static void Runtime_Disconnected(object sender, EventArgs e)
+        {
+            logger.Log("Disconnected from Runtime");
+        }
+
+        private static void StartOpenFin(VirtualChannel virtualChannel)
+        {
+            logger.Log("Starting Runtime");
+            var DotNetOptions = new RuntimeOptions()
+            {
+                UUID = "dcv_extenions_sdk_channel",
+                Version = "stable"
+            };
+
+            _runtime = Runtime.GetRuntimeInstance(DotNetOptions);
+            _runtime.Disconnected += Runtime_Disconnected;
+            _runtime.Connect(async () =>
+            {
+                logger.Log("Connected to Runtime");
+                _channelProvider = _runtime.InterApplicationBus.Channel.CreateProvider("DcvExtensionVirtualChannel");
+                await _channelProvider.OpenAsync();
+                logger.Log("Channel provider created");
+                _channelProvider.RegisterTopic<string>("proxy-request", (message) =>
+                {
+                    Task.Run(async () =>
+                    {
+                        logger.Log($"Proxy channel received: {message}");
+                        var bytes = Encoding.UTF8.GetBytes(message);
+                        if (virtualChannel != null)
+                        {
+                            await virtualChannel.WriteAsync(bytes, 0, bytes.Length);
+                        } else
+                        {
+                            _channelProvider.Broadcast("proxy-request", message);
+                        }
+                    });
+                });
+            });
+            logger.Log("After Runtime.connect");
+        }
+
     }
+
 }
