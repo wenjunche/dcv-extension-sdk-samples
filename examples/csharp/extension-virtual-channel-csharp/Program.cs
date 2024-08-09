@@ -50,9 +50,9 @@ namespace DcvExtensionVirtualChannelsCS
 
         public static void Main()
         {
-            StartOpenFin(null);
-            Thread.Sleep(1000 * 5000);
-            // MainAsync().GetAwaiter().GetResult();
+            //StartOpenFin(null);
+            //Thread.Sleep(1000 * 5000);
+            MainAsync().GetAwaiter().GetResult();
         }
 
         private static async Task MainAsync()
@@ -189,10 +189,11 @@ namespace DcvExtensionVirtualChannelsCS
                 _channelProvider = _runtime.InterApplicationBus.Channel.CreateProvider("DcvExtensionVirtualChannel");
                 await _channelProvider.OpenAsync();
                 logger.Log("Channel provider created");
-                _channelProvider.RegisterTopic<string>("proxy-request", (message) =>
+                _channelProvider.RegisterTopic<Context>("proxy-request", (ctx) =>
                 {
                     Task.Run(async () =>
                     {
+                        var message = JsonConvert.SerializeObject(ctx);
                         logger.Log($"Proxy channel received: {message}");
                         var bytes = Encoding.UTF8.GetBytes(message);
                         if (virtualChannel != null)
@@ -200,7 +201,7 @@ namespace DcvExtensionVirtualChannelsCS
                             await virtualChannel.WriteAsync(bytes, 0, bytes.Length);
                         } else
                         {
-                            _channelProvider.Broadcast("proxy-request", message);
+                            _channelProvider.Broadcast("proxy-request", ctx);
                         }
                     });
                 });
